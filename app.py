@@ -335,94 +335,115 @@ else:
             with st.expander("📖 Reference Data for ADQL Queries", expanded=False):
                 st.dataframe(df_reference)
 
-        user_query_nl = st.text_area("Describe your ADQL query in natural language:", height=100)
-
-        # Ensure the session state has a default ADQL query
+        # Ensure ADQL session state variables exist
         if "adql_query" not in st.session_state:
             st.session_state["adql_query"] = ""
 
+        if "adql_history" not in st.session_state:
+            st.session_state["adql_history"] = []
 
-        # ADQL Query Text Box (Always Visible & Editable)
-        sql_query_input = st.text_area("ADQL Query", value=st.session_state.get("adql_query", ""), height=100, key="adql_text_area")
+        if "last_adql_query" not in st.session_state:
+            st.session_state["last_adql_query"] = ""
 
-        # Generate ADQL Query Button (Stores in Session, Doesn't Overwrite on Graphing)
-        if st.button("Generate ADQL Query"):
+        if "tap_data" not in st.session_state:
+            st.session_state["tap_data"] = None
+
+        if "tap_data_updated" not in st.session_state:
+            st.session_state["tap_data_updated"] = False
+
+        # User input for natural language ADQL generation
+        user_query_nl = st.text_area("Describe your ADQL query in natural language:", height=100, key="adql_nl_input")
+
+        # ADQL Query Box (Users Can Modify It)
+        sql_query_input = st.text_area(
+            "ADQL Query",
+            value=st.session_state["adql_query"],  # Uses the stored value
+            height=100,
+            key="adql_query_box"  # Assigning a unique key
+        )
+
+        # Buttons for Generating and Retrying ADQL Queries
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            generate_query = st.button("Generate ADQL Query")
+
+        with col2:
+            retry_query = st.button("Retry Last Query")
+
+        # Handle Generate ADQL Query
+        if generate_query:
             if user_query_nl:
                 generated_query = generate_adql_query(user_query_nl, df_reference, client, temp_val)
                 if generated_query:
-                    st.session_state["adql_query"] = generated_query  # Store in session state
+                    st.session_state["adql_query"] = generated_query  # Overwrite with new query
                     st.session_state["last_adql_query"] = generated_query
                     st.session_state["adql_history"].append({"role": "user", "content": user_query_nl})
                     st.session_state["adql_history"].append({"role": "assistant", "content": generated_query})
                     st.rerun()  # Refresh UI to update text box
-
             else:
                 st.warning("Please enter a natural language query.")
 
-        # Run Query and Graph Data Button (Uses Latest User Input)
+        # Handle Retry Last Query
+        if retry_query:
+            if st.session_state["last_adql_query"]:
+                retry_message = f"Retrying last ADQL query: {st.session_state['last_adql_query']}"
+                st.session_state["adql_history"].append({"role": "user", "content": retry_message})
+
+                try:
+                    response = client.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": "Improve the last ADQL query."},
+                            {"role": "user", "content": retry_message}
+                        ],
+                        model="gpt-4o",
+                        max_tokens=1500,
+                        temperature=0.7,
+                    )
+                    improved_query = response.choices[0].message.content
+                    st.session_state["adql_query"] = improved_query  # Overwrite with improved query
+                    st.session_state["adql_history"].append({"role": "assistant", "content": improved_query})
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            else:
+                st.warning("No previous query to retry.")
+
+        # Add a limit selection UI element (default 500, max 50,000)
+        max_records = st.number_input("Set Max Rows (MAXREC)", min_value=100, max_value=50000, step=100, value=500)
+
         if st.button("Run Query and Graph Data"):
-            st.session_state["adql_query"] = sql_query_input  # Store manually edited query before running
+            st.session_state["adql_query"] = sql_query_input  # Store user-edited query before execution
 
             if st.session_state["adql_query"]:
                 tap_service_url = "https://datalab.noirlab.edu/tap/sync"
-                tap_query_url = f"{tap_service_url}?REQUEST=doQuery&LANG=ADQL&FORMAT=csv&QUERY={st.session_state['adql_query'].replace(' ', '+')}&LIMIT=500"
+                tap_query_url = f"{tap_service_url}?REQUEST=doQuery&LANG=ADQL&FORMAT=csv&QUERY={st.session_state['adql_query'].replace(' ', '+')}&MAXREC={max_records}"
 
-                with st.spinner("Fetching data from TAP service..."):
+                with st.spinner(f"Fetching up to {max_records} rows from TAP service..."):
                     df = download_tap_data(tap_query_url)
-                    
+
                 if df is not None:
                     st.session_state["tap_data"] = df
                     st.session_state["tap_data_updated"] = True
-                    st.success("Data successfully retrieved!")
+                    st.success(f"Data successfully retrieved! Showing up to {max_records} results.")
                     st.write("### TAP Query Result Data:")
-                    st.dataframe(df)  # Display DataFrame preview
+                    st.dataframe(df)
                 else:
                     st.error("Failed to retrieve data. Please check the query or try again.")
             else:
                 st.warning("Please generate or enter an ADQL query first.")
 
 
-    # Graphing and Visualization
+        # ------------------- ADQL HISTORY -------------------
+        with st.expander("View ADQL Query History", expanded=False):
+            for entry in st.session_state["adql_history"]:
+                if entry["role"] == "user":
+                    st.markdown(f"**User:** {entry['content']}")
+                else:
+                    st.code(entry["content"], language="sql")
 
-    if "tap_data" in st.session_state:
-        df = st.session_state["tap_data"]
+        # Button to Clear ADQL History
+        if st.button("Clear ADQL History"):
+            st.session_state["adql_history"] = []  # Reset history
+            st.success("ADQL history cleared!")  # Show success message
 
-        if st.session_state.get("tap_data_updated", False):
-            st.write("**TAP Query Result Data:**")
-            st.dataframe(df)
-            st.session_state["tap_data_updated"] = False
-
-        st.write("### Graphing Options")
-        graph_type = st.selectbox("Select Graph Type", ["Line", "Bar", "Scatter", "Heatmap"], key="graph_type")
-
-        if graph_type == "Heatmap":
-            x_column = st.selectbox("Select X-axis column", df.columns, key="heatmap_x_column")
-            y_column = st.selectbox("Select Y-axis column", df.columns, key="heatmap_y_column")
-            agg_column = st.selectbox("Select Aggregation Column", df.columns, key="heatmap_agg_column")
-
-            if st.button("Generate Heatmap"):
-                try:
-                    heatmap_data = df.pivot_table(index=y_column, columns=x_column, values=agg_column, aggfunc="mean", fill_value=0)
-                    plt.figure(figsize=(10, 6))
-                    sns.heatmap(heatmap_data, annot=True, fmt=".2f", cmap="viridis")
-                    plt.title(f"Heatmap of {agg_column} with {y_column} vs {x_column}")
-                    st.pyplot(plt)
-                except Exception as e:
-                    st.error(f"Error generating heatmap: {e}")
-        else:
-            x_column = st.selectbox("Select X-axis column", df.columns, key="x_column")
-            y_column = st.selectbox("Select Y-axis column", df.columns, key="y_column")
-
-            if st.button("Generate Graph"):
-                plt.figure(figsize=(10, 6))
-                if graph_type == "Line":
-                    plt.plot(df[x_column], df[y_column], label=f"{y_column} vs {x_column}")
-                elif graph_type == "Bar":
-                    plt.bar(df[x_column], df[y_column], label=f"{y_column} vs {x_column}")
-                elif graph_type == "Scatter":
-                    plt.scatter(df[x_column], df[y_column], label=f"{y_column} vs {x_column}", alpha=0.6)
-                plt.title(f"{graph_type} Graph: {y_column} vs {x_column}")
-                plt.xlabel(x_column)
-                plt.ylabel(y_column)
-                plt.legend()
-                st.pyplot(plt)
