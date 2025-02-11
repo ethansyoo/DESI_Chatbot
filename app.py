@@ -202,188 +202,248 @@ if "decrypted" not in st.session_state:
 else:
     client = OpenAI(api_key=st.session_state["openai_api_key"])
     collection = pdf.connect_to_mongo(st.session_state["mongo_username"], st.session_state["mongo_password"])
-    st.title("DESI Chatbot with Query and Graphing Features")
-    
+    st.title("chatDESI")
+
     if "history" not in st.session_state:
         st.session_state["history"] = []
     if "last_response" not in st.session_state:
         st.session_state["last_response"] = ""
     if "last_query" not in st.session_state:
         st.session_state["last_query"] = ""
+    if "adql_history" not in st.session_state:
+        st.session_state["adql_history"] = []
+    if "last_adql_query" not in st.session_state:
+        st.session_state["last_adql_query"] = ""
+
 
     # Load Reference CSV for ADQL
     df_reference = load_reference_data()
 
-    # ADQL Checkbox
-    use_adql = st.checkbox("Use ADQL Formatting")
-
-    # Show Reference Data if Available
-    if df_reference is not None:
-        st.write("### Reference Data for ADQL Queries:")
-        st.dataframe(df_reference)
-
-    user_input = st.text_input("Query:", key="input")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        send_query = st.button("Send")
-    with col2:
-        st.button("Clear text box", on_click=clear_text)
-    with col3:
-        st.button("Clear chat history", on_click=clear_history)
-    with col4:
-        retry_query = st.button("Retry")
-
-    token_limit = st.number_input(label="Token Limit", min_value=500, max_value=5000, step=100, value=1500)
+    # Mode selection: Chat or ADQL
+    mode = st.radio("Select Mode", ["Chat Mode", "ADQL Mode"])
+    token_limit = st.number_input(label="Token Limit", min_value=500, max_value=3000, step=100, value=1500)
     temp_val = st.slider(label="Temperature", min_value=0.0, max_value=1.5, value=0.7, step=0.1)
-    # Change query input based on checkbox state
-    if use_adql:
-        st.write("### ADQL Query Mode Enabled")
-        
-        # Get user input in natural language
-        user_query_nl = st.text_area("Describe your ADQL query in natural language:", height=100)
-        
-        # Initialize variable for storing generated query
-        adql_query = ""
 
-        # Button to trigger query generation
-        # Ensure adql_query is stored in session state
+    # --------------------- CHAT MODE ---------------------
+    if mode == "Chat Mode":
+        st.write("### chatDESI")
+
+        # User query input
+        user_input = st.text_input("Enter your message:", key="chat_input")
+        
+        # Send and retry buttons
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            send_query = st.button("Send")
+        with col2:
+            retry_query = st.button("Retry")
+
+        # Send user message
+        if send_query and user_input:
+            st.session_state["last_query"] = user_input
+            st.session_state["history"].append({"role": "user", "content": user_input})
+
+            # Retrieve relevant documents
+            relevant_docs = find_relevant_docs(user_input, client, collection, top_k=3)
+            st.session_state["relevant_docs"] = relevant_docs  # Store for sidebar display
+
+            # Process user query
+            try:
+                context_snippets = "\n\n".join([doc["text"][:1000] for doc in relevant_docs[:3]])  # Limit to 1000 chars per doc
+
+                response = client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "system", "content": f"Relevant document context:\n\n{context_snippets}"},
+                        {"role": "user", "content": user_input}
+                    ],
+                    model="gpt-4o",
+                    max_tokens=token_limit,
+                    temperature=temp_val,
+                )
+                assistant_message = response.choices[0].message.content
+                st.session_state["history"].append({"role": "assistant", "content": assistant_message})
+                st.session_state['last_response'] = assistant_message
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+
+        # Retry last query
+        if retry_query:
+            retry_message = f"Previous query: {st.session_state['last_query']}. Retrying with improvements."
+            st.session_state["history"].append({"role": "user", "content": retry_message})
+
+            try:
+                response = client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant. Improve the previous response."},
+                        {"role": "user", "content": retry_message}
+                    ],
+                    model="gpt-4o",
+                    max_tokens=token_limit,
+                    temperature=temp_val,
+                )
+                assistant_response = response.choices[0].message.content
+                st.session_state["history"].append({"role": "assistant", "content": assistant_response})
+                st.session_state['last_response'] = assistant_response
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+        # Display last response
+        if "last_response" in st.session_state and st.session_state["last_response"]:
+            st.write("### chatDESI")
+            st.markdown(st.session_state["last_response"])
+
+        # Expandable chat history (instead of sidebar)
+        with st.expander("View Full Chat History", expanded=False):
+            for chat in st.session_state["history"]:
+                if chat["role"] == "user":
+                    st.markdown(f"**User:** {chat['content']}")
+                else:
+                    st.code(chat['content'], language="markdown")
+
+        # Sidebar for Relevant Documents
+        with st.sidebar:
+            st.write("## Relevant Documents")
+
+            # Add a collapsible section for relevant documents
+            with st.expander("View Relevant Documents", expanded=True):
+                if "relevant_docs" in st.session_state and st.session_state["relevant_docs"]:
+                    for doc in st.session_state["relevant_docs"]:
+                        st.markdown(f"**Filename:** {doc['metadata']['filename']}")
+                        st.markdown(f"**Snippet:** {doc['text'][:500]}...")  # Show first 500 characters
+                        st.divider()  # Adds a visual separation
+                else:
+                    st.write("No relevant documents found.")
+
+
+        # Clear chat history button
+        if st.button("Clear Chat History"):
+            st.session_state["history"] = []
+            st.session_state["last_query"] = ""
+            st.session_state["last_response"] = ""
+            st.success("Chat history cleared!")
+
+    # --------------------- ADQL MODE ---------------------
+    elif mode == "ADQL Mode":
+        st.write("### ADQL Query Builder")
+
+        # Load reference data
+        df_reference = load_reference_data()
+
+        if df_reference is not None:
+            with st.expander("📖 Reference Data for ADQL Queries", expanded=False):
+                st.dataframe(df_reference)
+
+        # Ensure ADQL session state variables exist
         if "adql_query" not in st.session_state:
             st.session_state["adql_query"] = ""
 
-        # Button to generate ADQL Query
-        if st.button("Generate ADQL Query"):
+        if "adql_history" not in st.session_state:
+            st.session_state["adql_history"] = []
+
+        if "last_adql_query" not in st.session_state:
+            st.session_state["last_adql_query"] = ""
+
+        if "tap_data" not in st.session_state:
+            st.session_state["tap_data"] = None
+
+        if "tap_data_updated" not in st.session_state:
+            st.session_state["tap_data_updated"] = False
+
+        # User input for natural language ADQL generation
+        user_query_nl = st.text_area("Describe your ADQL query in natural language:", height=100, key="adql_nl_input")
+
+        # ADQL Query Box (Users Can Modify It)
+        sql_query_input = st.text_area(
+            "ADQL Query",
+            value=st.session_state["adql_query"],  # Uses the stored value
+            height=100,
+            key="adql_query_box"  # Assigning a unique key
+        )
+
+        # Buttons for Generating and Retrying ADQL Queries
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            generate_query = st.button("Generate ADQL Query")
+
+        with col2:
+            retry_query = st.button("Retry Last Query")
+
+        # Handle Generate ADQL Query
+        if generate_query:
             if user_query_nl:
                 generated_query = generate_adql_query(user_query_nl, df_reference, client, temp_val)
                 if generated_query:
-                    st.session_state["adql_query"] = generated_query  # Store in session state
-                    st.text_area("Generated ADQL Query:", value=st.session_state["adql_query"], height=100, key="generated_adql_query")
+                    st.session_state["adql_query"] = generated_query  # Overwrite with new query
+                    st.session_state["last_adql_query"] = generated_query
+                    st.session_state["adql_history"].append({"role": "user", "content": user_query_nl})
+                    st.session_state["adql_history"].append({"role": "assistant", "content": generated_query})
+                    st.rerun()  # Refresh UI to update text box
             else:
                 st.warning("Please enter a natural language query.")
 
+        # Handle Retry Last Query
+        if retry_query:
+            if st.session_state["last_adql_query"]:
+                retry_message = f"Retrying last ADQL query: {st.session_state['last_adql_query']}"
+                st.session_state["adql_history"].append({"role": "user", "content": retry_message})
 
-        # Execute Queries
-        # Button to execute query and fetch data
+                try:
+                    response = client.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": "Improve the last ADQL query."},
+                            {"role": "user", "content": retry_message}
+                        ],
+                        model="gpt-4o",
+                        max_tokens=1500,
+                        temperature=0.7,
+                    )
+                    improved_query = response.choices[0].message.content
+                    st.session_state["adql_query"] = improved_query  # Overwrite with improved query
+                    st.session_state["adql_history"].append({"role": "assistant", "content": improved_query})
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            else:
+                st.warning("No previous query to retry.")
+
+        # Add a limit selection UI element (default 500, max 50,000)
+        max_records = st.number_input("Set Max Rows (MAXREC)", min_value=100, max_value=50000, step=100, value=500)
+
         if st.button("Run Query and Graph Data"):
-            if st.session_state["adql_query"]:  # Read from session state
+            st.session_state["adql_query"] = sql_query_input  # Store user-edited query before execution
+
+            if st.session_state["adql_query"]:
                 tap_service_url = "https://datalab.noirlab.edu/tap/sync"
-                tap_query_url = f"{tap_service_url}?REQUEST=doQuery&LANG=ADQL&FORMAT=csv&QUERY={st.session_state['adql_query'].replace(' ', '+')}"
-                print(tap_query_url)
-                # Display loading message
-                with st.spinner("Fetching data from TAP service..."):
-                    df = download_tap_data(tap_query_url)  # Automatically download and parse CSV
-                    
+                tap_query_url = f"{tap_service_url}?REQUEST=doQuery&LANG=ADQL&FORMAT=csv&QUERY={st.session_state['adql_query'].replace(' ', '+')}&MAXREC={max_records}"
+
+                with st.spinner(f"Fetching up to {max_records} rows from TAP service..."):
+                    df = download_tap_data(tap_query_url)
+
                 if df is not None:
                     st.session_state["tap_data"] = df
                     st.session_state["tap_data_updated"] = True
-                    st.success("Data successfully retrieved!")
+                    st.success(f"Data successfully retrieved! Showing up to {max_records} results.")
                     st.write("### TAP Query Result Data:")
-                    st.dataframe(df)  # Display DataFrame preview
+                    st.dataframe(df)
                 else:
                     st.error("Failed to retrieve data. Please check the query or try again.")
             else:
-                st.warning("Please generate an ADQL query first.")
+                st.warning("Please generate or enter an ADQL query first.")
 
 
-    # Graphing and Visualization
+        # ------------------- ADQL HISTORY -------------------
+        with st.expander("View ADQL Query History", expanded=False):
+            for entry in st.session_state["adql_history"]:
+                if entry["role"] == "user":
+                    st.markdown(f"**User:** {entry['content']}")
+                else:
+                    st.code(entry["content"], language="sql")
 
-    if "tap_data" in st.session_state:
-        df = st.session_state["tap_data"]
+        # Button to Clear ADQL History
+        if st.button("Clear ADQL History"):
+            st.session_state["adql_history"] = []  # Reset history
+            st.success("ADQL history cleared!")  # Show success message
 
-        if st.session_state.get("tap_data_updated", False):
-            st.write("**TAP Query Result Data:**")
-            st.dataframe(df)
-            st.session_state["tap_data_updated"] = False
-
-        st.write("### Graphing Options")
-        graph_type = st.selectbox("Select Graph Type", ["Line", "Bar", "Scatter", "Heatmap"], key="graph_type")
-
-        if graph_type == "Heatmap":
-            x_column = st.selectbox("Select X-axis column", df.columns, key="heatmap_x_column")
-            y_column = st.selectbox("Select Y-axis column", df.columns, key="heatmap_y_column")
-            agg_column = st.selectbox("Select Aggregation Column", df.columns, key="heatmap_agg_column")
-
-            if st.button("Generate Heatmap"):
-                try:
-                    heatmap_data = df.pivot_table(index=y_column, columns=x_column, values=agg_column, aggfunc="mean", fill_value=0)
-                    plt.figure(figsize=(10, 6))
-                    sns.heatmap(heatmap_data, annot=True, fmt=".2f", cmap="viridis")
-                    plt.title(f"Heatmap of {agg_column} with {y_column} vs {x_column}")
-                    st.pyplot(plt)
-                except Exception as e:
-                    st.error(f"Error generating heatmap: {e}")
-        else:
-            x_column = st.selectbox("Select X-axis column", df.columns, key="x_column")
-            y_column = st.selectbox("Select Y-axis column", df.columns, key="y_column")
-
-            if st.button("Generate Graph"):
-                plt.figure(figsize=(10, 6))
-                if graph_type == "Line":
-                    plt.plot(df[x_column], df[y_column], label=f"{y_column} vs {x_column}")
-                elif graph_type == "Bar":
-                    plt.bar(df[x_column], df[y_column], label=f"{y_column} vs {x_column}")
-                elif graph_type == "Scatter":
-                    plt.scatter(df[x_column], df[y_column], label=f"{y_column} vs {x_column}", alpha=0.6)
-                plt.title(f"{graph_type} Graph: {y_column} vs {x_column}")
-                plt.xlabel(x_column)
-                plt.ylabel(y_column)
-                plt.legend()
-                st.pyplot(plt)
-
-    # User Query Section
-
-    if send_query and user_input:
-        st.session_state["last_query"] = user_input
-        st.session_state["history"].append({"role": "user", "content": user_input})
-
-        relevant_docs = find_relevant_docs(user_input, client, collection, top_k=3)
-        context_snippets = []
-
-        if relevant_docs:
-            st.write("### Relevant Documents:")
-            for doc in relevant_docs:
-                snippet = doc['text'][:500]  # Truncate snippet to avoid excess length
-                context_snippets.append(f"Filename: {doc['metadata']['filename']}\nSnippet: {snippet}")
-                st.write(f"**Filename:** {doc['metadata']['filename']}")
-                st.write(f"**Snippet:** {snippet}...")
-        else:
-            st.write("No relevant documents found.")
-
-        # Combine user input and relevant document context
-        system_prompt = (
-            "You are a helpful assistant. Below are snippets from relevant documents "
-            "related to the user's query. Use this information to provide a comprehensive response."
-        )
-        document_context = "\n\n".join(context_snippets)
-        user_message = user_input
-
-        # Build the messages list for OpenAI API
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "system", "content": f"Relevant document context:\n\n{document_context}"},
-            {"role": "user", "content": user_message}
-        ]
-
-        try:
-            response = client.chat.completions.create(
-                messages=messages,
-                model="chatgpt-4o-latest",
-                max_tokens=token_limit,
-                temperature=temp_val,
-            )
-            assistant_message = response.choices[0].message.content
-            st.session_state["history"].append({"role": "assistant", "content": assistant_message})
-            st.session_state['last_response'] = assistant_message
-        except Exception as e:
-            st.error(f"Error: {e}")
-
-
-    if retry_query:
-        retry_message = f"Previous query: {st.session_state['last_query']}. Retrying with improvements."
-        st.session_state["history"].append({"role": "user", "content": retry_message})
-        st.write("Retrying the last query...")
-
-    for chat in st.session_state["history"]:
-        if chat["role"] == "user":
-            parse_and_render_content("USER", chat['content'])
-        else:
-            parse_and_render_content("chatDESI", chat['content'])
