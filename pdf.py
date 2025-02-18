@@ -13,7 +13,7 @@ def connect_to_mongo(mongo_username, mongo_password):
 def compute_text_hash(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
-def split_text_into_chunks(text, max_tokens=1000):
+def split_text_into_chunks(text, max_tokens=3000):
     words = text.split()
     chunks = []
     current_chunk = []
@@ -74,7 +74,7 @@ def load_pdfs_into_db(pdf_dir, mongo_username, mongo_password, client):
             add_pdf_to_db(text, filename, client, collection)
             
 def create_embedding(text_chunk, client):
-    response = client.embeddings.create(input=text_chunk, model="text-embedding-3-small")
+    response = client.embeddings.create(input=text_chunk, model="text-embedding-3-large")
     embedding = response.data[0].embedding
     return embedding
 
