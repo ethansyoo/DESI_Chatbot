@@ -489,4 +489,25 @@ else:
             if st.button("Clear ADQL History"):
                 st.session_state["adql_history"] = []  # Reset history
                 st.success("ADQL history cleared!")  # Show success message
+# Feedback footer at the bottom of the screen
+feedback_url = "https://forms.gle/pVoAzEgFwKZ4zmXNA"
+footer = f"""
+    <style>
+    .feedback-footer {{
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        text-align: center;
+        opacity: 0.6;
+        font-size: 12px;
+        padding: 5px;
+    }}
+    </style>
+    <div class="feedback-footer">
+        Beta testing feedback: <a href="{feedback_url}" target="_blank">Click here</a>
+    </div>
+"""
+st.markdown(footer, unsafe_allow_html=True)
+
 
