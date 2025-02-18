@@ -106,3 +106,7 @@ def find_relevant_docs(query, mongo_username, mongo_password, client, top_k=3):
     sorted_indices = similarities.argsort()[::-1][:top_k]
     relevant_docs = [documents[i] for i in sorted_indices]
     return relevant_docs
+
+def clear_collections(mongo_username, mongo_password):
+    collection = connect_to_mongo(mongo_username, mongo_password)
+    collection.delete_many({}) 

@@ -230,7 +230,8 @@ else:
         mode = st.radio("Select Mode", ["Chat Mode", "ADQL Mode"])
         token_limit = st.number_input(label="Token Limit", min_value=500, max_value=3000, step=100, value=1500)
         temp_val = st.slider(label="Temperature", min_value=0.0, max_value=1.5, value=0.7, step=0.1)
-        
+        reference_toggle = st.checkbox('Reference Papers')
+
         if mode == "ADQL Mode":
             max_records = st.number_input("Set Max Rows (MAXREC)", min_value=100, max_value=50000, step=100, value=500)
 
@@ -269,7 +270,7 @@ else:
 
             # User query input
             user_input = st.text_input("Enter your message:", key="chat_input")
-            
+
             # Send and retry buttons
             col1, col2, col3 = st.columns([1, 1, 1])
             with col1:
@@ -285,16 +286,20 @@ else:
                 st.session_state["history"].append({"role": "user", "content": user_input})
 
                 # Retrieve relevant documents
-                relevant_docs = pdf.find_relevant_docs(user_input, st.session_state['mongo_username'], st.session_state['mongo_password'], client, top_k=3)
-                st.session_state["relevant_docs"] = relevant_docs  # Store for sidebar display
+                if reference_toggle:
+                    relevant_docs = pdf.find_relevant_docs(user_input, st.session_state['mongo_username'], st.session_state['mongo_password'], client, top_k=3)
+                    st.session_state["relevant_docs"] = relevant_docs  # Store for sidebar display
 
                 # Process user query
                 try:
-                    context_snippets = "\n\n".join([doc["text"][:1000] for doc in relevant_docs[:3]])  # Limit to 1000 chars per doc
+                    context = ''
+                    if reference_toggle:
+                        context_snippets = "\n\n".join([doc["text"] for doc in relevant_docs[:3]])  # Limit to 1000 chars per doc
+                        context = f"Relevant document context:\n\n{context_snippets}"
 
                     response = client.chat.completions.create(
                         messages=[
-                            {"role": "system", "content": f"Relevant document context:\n\n{context_snippets}"},
+                            {"role": "system", "content": context},
                             {"role": "user", "content": user_input}
                         ],
                         model="gpt-4o",
