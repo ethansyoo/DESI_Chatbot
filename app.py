@@ -254,7 +254,7 @@ else:
                     if existing_document:
                         st.sidebar.warning(f"Duplicate PDF detected: {uploaded_file.name} (Skipping)")
                     else:
-                        pdf.add_pdf_to_db(text, uploaded_file.name, client, collection)
+                        pdf.add_pdf_to_db(text, uploaded_file.name, collection)
                         st.sidebar.success(f"'{uploaded_file.name}' uploaded and processed successfully!")
 
                 except Exception as e:
@@ -267,6 +267,8 @@ else:
         # --------------------- CHAT MODE ---------------------
         if mode == "Chat Mode":
             st.write("### chatDESI")
+            if st.button("Clear Mongo"):
+                pdf.clear_collections(st.session_state['mongo_username'], st.session_state['mongo_password'])
 
             # User query input
             user_input = st.text_input("Enter your message:", key="chat_input")
@@ -287,7 +289,7 @@ else:
 
                 # Retrieve relevant documents
                 if reference_toggle:
-                    relevant_docs = pdf.find_relevant_docs(user_input, st.session_state['mongo_username'], st.session_state['mongo_password'], client, top_k=3)
+                    relevant_docs = pdf.find_relevant_docs(user_input, st.session_state['mongo_username'], st.session_state['mongo_password'], top_k=3)
                     st.session_state["relevant_docs"] = relevant_docs  # Store for sidebar display
 
                 # Process user query
@@ -500,7 +502,7 @@ footer = f"""
         width: 100%;
         text-align: center;
         opacity: 0.6;
-        font-size: 12px;
+        font-size: 14px;
         padding: 5px;
     }}
     </style>

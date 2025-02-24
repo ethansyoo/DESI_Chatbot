@@ -1,37 +1,42 @@
 from pymongo import MongoClient
-import fitz
+import fitz  # PyMuPDF for PDF text extraction
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import hashlib
+import os
+import torch
+from transformers import AutoTokenizer, AutoModel
 
+# Load Hugging Face Model for Tokenization & Embeddings
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # Change this to a 1536/3072-d model if needed
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModel.from_pretrained(MODEL_NAME)
+
+# MongoDB Connection
 def connect_to_mongo(mongo_username, mongo_password):
     client = MongoClient(f"mongodb+srv://{mongo_username}:{mongo_password}@cluster89780.vxuht.mongodb.net/?appName=mongosh+2.3.3&tls=true")
     db = client["pdf_database"]
     collection = db["pdf_documents"]
     return collection
 
+# Hash Function for Deduplication
 def compute_text_hash(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
-def split_text_into_chunks(text, max_tokens=3000):
-    words = text.split()
+# Overlapping Sliding Window Chunking (150 Tokens per Chunk, 50 Token Overlap)
+def sliding_window_chunks(text, tokenizer, chunk_size=150, overlap=50):
+    tokens = tokenizer.tokenize(text)  # Convert text to tokens
     chunks = []
-    current_chunk = []
-    current_token_count = 0
+    step = chunk_size - overlap  # Sliding step
 
-    for word in words:
-        current_token_count += len(word) // 4
-        if current_token_count >= max_tokens:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = []
-            current_token_count = len(word) // 4
-        current_chunk.append(word)
+    for i in range(0, len(tokens), step):
+        chunk_tokens = tokens[i:i + chunk_size]
+        chunk_text = tokenizer.convert_tokens_to_string(chunk_tokens)  # Convert back to text
+        chunks.append(chunk_text)
 
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-    
     return chunks
 
+# Extract Text from PDF
 def extract_text_from_pdf(pdf_path):
     text = ""
     with fitz.open(pdf_path) as pdf:
@@ -39,7 +44,17 @@ def extract_text_from_pdf(pdf_path):
             text += page.get_text()
     return text
 
-def add_pdf_to_db(text, filename, client, collection):
+# Embedding Function Using Hugging Face Model
+def embed_text(text):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    # Mean pooling over last hidden state
+    embeddings = outputs.last_hidden_state.mean(dim=1)
+    return embeddings.squeeze(0).numpy()  # Convert to NumPy array for MongoDB storage
+
+# Add Processed PDF Text & Chunks to MongoDB
+def add_pdf_to_db(text, filename, collection):
     document_hash = compute_text_hash(text)
     existing_document = collection.find_one({"metadata.document_hash": document_hash})
     
@@ -47,10 +62,10 @@ def add_pdf_to_db(text, filename, client, collection):
         print(f"Duplicate document detected: '{filename}' - Skipping entire document.")
         return
 
-    text_chunks = split_text_into_chunks(text)
+    text_chunks = sliding_window_chunks(text, tokenizer)
 
     for i, chunk in enumerate(text_chunks):
-        embedding = create_embedding(chunk, client)
+        embedding = embed_text(chunk).tolist()
         document = {
             "text": chunk,
             "embedding": embedding,
@@ -61,52 +76,39 @@ def add_pdf_to_db(text, filename, client, collection):
             }
         }
         collection.insert_one(document)
-    print(f"Document '{filename}' added successfully.")
+    print(f"Document '{filename}' added successfully with {len(text_chunks)} chunks.")
 
-
-def load_pdfs_into_db(pdf_dir, mongo_username, mongo_password, client):
+# Process PDFs and Store in MongoDB
+def load_pdfs_into_db(pdf_dir, mongo_username, mongo_password):
     collection = connect_to_mongo(mongo_username, mongo_password)
-    import os
-    for filename in os.listdir(pdf_dir):
-        if filename.endswith(".pdf"):
-            pdf_path = os.path.join(pdf_dir, filename)
-            text = extract_text_from_pdf(pdf_path)
-            add_pdf_to_db(text, filename, client, collection)
-            
-def create_embedding(text_chunk, client):
-    response = client.embeddings.create(input=text_chunk, model="text-embedding-3-large")
-    embedding = response.data[0].embedding
-    return embedding
-
-def load_pdfs_into_index(client, pdf_dir, mongo_username, mongo_password):
-    collection = connect_to_mongo(mongo_username, mongo_password)
-    import os
-    for filename in os.listdir(pdf_dir):
-        if filename.endswith(".pdf"):
-            pdf_path = os.path.join(pdf_dir, filename)
-            text = extract_text_from_pdf(pdf_path)
-            add_pdf_to_db(text, filename, client, collection)
-
-def find_relevant_docs(query, mongo_username, mongo_password, client, top_k=3):
-    collection = connect_to_mongo(mongo_username, mongo_password)
-    query_embedding = create_embedding(query, client)
     
-    if query_embedding is None or len(query_embedding) == 0:
-        return []
+    for filename in os.listdir(pdf_dir):
+        if filename.endswith(".pdf"):
+            pdf_path = os.path.join(pdf_dir, filename)
+            text = extract_text_from_pdf(pdf_path)
+            add_pdf_to_db(text, filename, collection)
 
-    query_embedding = np.array(query_embedding).reshape(1, -1)
+# Retrieve Relevant Documents Using Cosine Similarity
+def find_relevant_docs(query, mongo_username, mongo_password, top_k=3):
+    collection = connect_to_mongo(mongo_username, mongo_password)
+    query_embedding = embed_text(query)
 
+    # Fetch all stored embeddings from MongoDB
     documents = list(collection.find())
-    embeddings = np.array([doc["embedding"] for doc in documents if "embedding" in doc and doc["embedding"]])
+    embeddings = np.array([doc["embedding"] for doc in documents if "embedding" in doc])
 
     if embeddings.size == 0:
         return []
 
+    # Compute Cosine Similarities
+    query_embedding = np.array(query_embedding).reshape(1, -1)
     similarities = cosine_similarity(query_embedding, embeddings).flatten()
-    sorted_indices = similarities.argsort()[::-1][:top_k]
+    sorted_indices = similarities.argsort()[::-1][:top_k]  # Get top-k most similar
+
     relevant_docs = [documents[i] for i in sorted_indices]
     return relevant_docs
 
+# Clear MongoDB Collection
 def clear_collections(mongo_username, mongo_password):
     collection = connect_to_mongo(mongo_username, mongo_password)
-    collection.delete_many({}) 
+    collection.delete_many({})
