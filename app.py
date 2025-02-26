@@ -267,8 +267,6 @@ else:
         # --------------------- CHAT MODE ---------------------
         if mode == "Chat Mode":
             st.write("### chatDESI")
-            if st.button("Clear Mongo"):
-                pdf.clear_collections(st.session_state['mongo_username'], st.session_state['mongo_password'])
 
             # User query input
             user_input = st.text_input("Enter your message:", key="chat_input")
