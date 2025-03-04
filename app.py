@@ -98,24 +98,6 @@ def download_tap_data(query_url):
         st.error(f"Unexpected error: {e}")
         return None
 
-
-# def find_relevant_docs(query, client, collection, top_k=3):
-#     query_embedding = pdf.create_embedding(query, client)
-#     if not query_embedding:
-#         return []
-
-#     query_embedding = np.array(query_embedding).reshape(1, -1)
-#     documents = list(collection.find())
-#     embeddings = np.array([doc["embedding"] for doc in documents if "embedding" in doc])
-
-#     if not embeddings.size:
-#         return []
-
-#     similarities = cosine_similarity(query_embedding, embeddings).flatten()
-#     sorted_indices = similarities.argsort()[::-1][:top_k]
-#     relevant_docs = [documents[i] for i in sorted_indices]
-#     return relevant_docs
-
 def generate_adql_query(user_input, df_reference, client, temp_val):
     """Generate an ADQL query from natural language using reference CSV data."""
     if df_reference is None or df_reference.empty:
@@ -236,29 +218,29 @@ else:
             max_records = st.number_input("Set Max Rows (MAXREC)", min_value=100, max_value=50000, step=100, value=500)
 
     with col_left:
-        st.sidebar.write("## 📄 Upload PDFs to MongoDB")
-        uploaded_pdfs = st.sidebar.file_uploader("Upload PDF Files", type="pdf", accept_multiple_files=True)
+        # st.sidebar.write("## 📄 Upload PDFs to MongoDB")
+        # uploaded_pdfs = st.sidebar.file_uploader("Upload PDF Files", type="pdf", accept_multiple_files=True)
 
-        if uploaded_pdfs:
-            for uploaded_file in uploaded_pdfs:
-                text = ""
-                try:
-                    # Extract text from PDF
-                    with fitz.open(stream=uploaded_file.read(), filetype="pdf") as doc:
-                        for page in doc:
-                            text += page.get_text()
+        # if uploaded_pdfs:
+        #     for uploaded_file in uploaded_pdfs:
+        #         text = ""
+        #         try:
+        #             # Extract text from PDF
+        #             with fitz.open(stream=uploaded_file.read(), filetype="pdf") as doc:
+        #                 for page in doc:
+        #                     text += page.get_text()
 
-                    document_hash = pdf.compute_text_hash(text)
-                    existing_document = collection.find_one({"metadata.document_hash": document_hash})
+        #             document_hash = pdf.compute_text_hash(text)
+        #             existing_document = collection.find_one({"metadata.document_hash": document_hash})
 
-                    if existing_document:
-                        st.sidebar.warning(f"Duplicate PDF detected: {uploaded_file.name} (Skipping)")
-                    else:
-                        pdf.add_pdf_to_db(text, uploaded_file.name, collection)
-                        st.sidebar.success(f"'{uploaded_file.name}' uploaded and processed successfully!")
+        #             if existing_document:
+        #                 st.sidebar.warning(f"Duplicate PDF detected: {uploaded_file.name} (Skipping)")
+        #             else:
+        #                 pdf.add_pdf_to_db(text, uploaded_file.name, collection)
+        #                 st.sidebar.success(f"'{uploaded_file.name}' uploaded and processed successfully!")
 
-                except Exception as e:
-                    st.sidebar.error(f"Error processing {uploaded_file.name}: {e}")
+        #         except Exception as e:
+        #             st.sidebar.error(f"Error processing {uploaded_file.name}: {e}")
 
         # Load Reference CSV for ADQL
         df_reference = load_reference_data()
