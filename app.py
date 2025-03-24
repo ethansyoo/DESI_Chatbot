@@ -12,6 +12,7 @@ import re
 import seaborn as sns
 import numpy as np
 import hashlib
+import adql
 from sklearn.metrics.pairwise import cosine_similarity
 
 # GitHub raw URL of the reference CSV file
@@ -125,9 +126,14 @@ def generate_adql_query(user_input, df_reference, client, temp_val):
         """
     )
     
+    examples = ""
+    rl_context = adql.find_similar_adql_queries(user_input, adql_collection, top_k=5)
+    if rl_context:
+        examples = "\n\n".join([f"NL: {q['user_query']}\nADQL:\n{q['generated_adql']}" for q in rl_context])
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "system", "content": f"Available columns: {available_columns}"},
+        {"role": "system", "content": f"Here are successful examples from the past:\n\n{examples}"},
         {"role": "user", "content": user_input}
     ]
     
@@ -193,7 +199,10 @@ if "decrypted" not in st.session_state:
 else:
     client = OpenAI(api_key=st.session_state["openai_api_key"])
     collection = pdf.connect_to_mongo(st.session_state["mongo_username"], st.session_state["mongo_password"])
-
+    adql_collection = adql.connect_to_adql_collection(
+        st.session_state["mongo_username"],
+        st.session_state["mongo_password"]
+    )
 
     if "history" not in st.session_state:
         st.session_state["history"] = []
@@ -212,7 +221,7 @@ else:
         mode = st.radio("Select Mode", ["Chat Mode", "ADQL Mode"])
         token_limit = st.number_input(label="Token Limit", min_value=500, max_value=3000, step=100, value=1500)
         temp_val = st.slider(label="Temperature", min_value=0.0, max_value=1.5, value=0.7, step=0.1)
-        reference_toggle = st.checkbox('Reference Papers')
+        reference_toggle = st.checkbox('Reference Papers', value=True)
 
         if mode == "ADQL Mode":
             max_records = st.number_input("Set Max Rows (MAXREC)", min_value=100, max_value=50000, step=100, value=500)
@@ -337,9 +346,8 @@ else:
                 with st.expander("View Relevant Documents", expanded=True):
                     if "relevant_docs" in st.session_state and st.session_state["relevant_docs"]:
                         for doc in st.session_state["relevant_docs"]:
-                            st.markdown(f"**Filename:** {doc['metadata']['filename']}")
-                            st.markdown(f"**Snippet:** {doc['text'][:500]}...")  # Show first 500 characters
-                            st.divider()  # Adds a visual separation
+                            with st.expander(f"{doc['metadata']['filename']}", expanded=False):
+                                st.markdown(doc['text'])
                     else:
                         st.write("No relevant documents found.")
 
@@ -439,8 +447,8 @@ else:
             # Add a limit selection UI element (default 500, max 50,000)
             if st.button("Run Query and Graph Data"):
                 st.session_state["adql_query"] = sql_query_input  # Store user-edited query before execution
-
-                if st.session_state["adql_query"]:
+                generated_query = st.session_state["adql_query"]
+                if generated_query:
                     tap_service_url = "https://datalab.noirlab.edu/tap/sync"
                     tap_query_url = f"{tap_service_url}?REQUEST=doQuery&LANG=ADQL&FORMAT=csv&QUERY={st.session_state['adql_query'].replace(' ', '+')}&MAXREC={max_records}"
 
@@ -448,16 +456,63 @@ else:
                         df = download_tap_data(tap_query_url)
 
                     if df is not None:
+                        entry_id = adql.log_adql_query(
+                            adql_collection,
+                            user_query_nl,
+                            generated_query,
+                            execution_success=True,
+                            tap_result_rows=len(df)
+                        )
+
                         st.session_state["tap_data"] = df
                         st.session_state["tap_data_updated"] = True
+                        st.session_state["last_adql_doc_id"] = entry_id
+                        st.session_state["last_adql_user_query"] = user_query_nl
+                        st.session_state["last_adql_generated_query"] = generated_query
+                        st.session_state["show_feedback_buttons"] = True
+
                         st.success(f"Data successfully retrieved! Showing up to {max_records} results.")
                         st.write("### TAP Query Result Data:")
                         st.dataframe(df)
                     else:
+                        adql.log_adql_query(
+                            adql_collection,
+                            user_query_nl,
+                            st.session_state["adql_query"],
+                            execution_success=False,
+                            tap_result_rows=0
+                        )
                         st.error("Failed to retrieve data. Please check the query or try again.")
                 else:
                     st.warning("Please generate or enter an ADQL query first.")
 
+            if (
+                st.session_state.get("show_feedback_buttons")
+                and st.session_state.get("last_adql_doc_id")
+                and st.session_state.get("last_adql_user_query")
+                and st.session_state.get("last_adql_generated_query")
+            ):
+                st.write("#### Was this query helpful?")
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    if st.button("👍 Mark as Helpful"):
+                        adql.update_feedback(
+                            adql_collection,
+                            st.session_state["last_adql_doc_id"],
+                            "positive"
+                        )
+                        st.toast("Thanks for the feedback!")
+                        st.session_state["show_feedback_buttons"] = False
+
+                with col2:
+                    if st.button("👎 Not Helpful"):
+                        adql.update_feedback(
+                            adql_collection,
+                            st.session_state["last_adql_doc_id"],
+                            "negative"
+                        )
+                        st.toast("Got it — we'll use that to improve.")
+                        st.session_state["show_feedback_buttons"] = False
 
             # ------------------- ADQL HISTORY -------------------
             with st.expander("View ADQL Query History", expanded=False):
