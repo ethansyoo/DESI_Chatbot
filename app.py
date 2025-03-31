@@ -32,7 +32,6 @@ def load_reference_data():
         st.error(f"Error loading reference data: {e}")
         return None
 
-
 def decrypt_data(encrypted_data, key):
     nonce = encrypted_data[:12]
     aesgcm = AESGCM(key)
@@ -100,7 +99,7 @@ def download_tap_data(query_url):
         return None
 
 def generate_adql_query(user_input, df_reference, client, temp_val):
-    """Generate an ADQL query from natural language using reference CSV data."""
+    """Generate an ADQL query from natural language using reference CSV data with RL examples."""
     if df_reference is None or df_reference.empty:
         st.error("Reference data is not available. Cannot generate ADQL query.")
         return None
@@ -108,35 +107,66 @@ def generate_adql_query(user_input, df_reference, client, temp_val):
     available_columns = ", ".join(df_reference.columns)
     system_prompt = (
         "You are a helpful assistant that converts natural language queries into ADQL (Astronomical Data Query Language). "
-        "Return only the SQL query inside a code block (```sql ... ```) and nothing else. Do NOT provide explanations, warnings, or extra text. "
-        "Ensure the query is formatted correctly for execution in the TAP service."
-        """
-        ADQL cheat sheet:
-
-        You cannot use LIMIT in ADQL. It is a rule.
-
-        Example queries: 
-        Query: Give me all DESI redshifts within 1 degree of RA=241.050 and DEC=43.45
-
-        Answer: SELECT zpix.z, zpix.zerr, zpix.mean_fiber_ra, zpix.mean_fiber_dec FROM desi_edr.zpix AS zpix WHERE zpix.mean_fiber_ra BETWEEN 240.050 AND 242.050 AND zpix.mean_fiber_dec BETWEEN 42.450 AND 44.450 AND zpix.zwarn = 0
-
-        Query: Give me all DESI redshifts within 1 Mpc of RA=241.050 and DEC=43.45 at redshift z=0.5.
-
-        Answer: SELECT zpix.z, zpix.zerr FROM desi_edr.zpix AS zpix JOIN desi_edr.ztile AS ztile ON zpix.targetid = ztile.targetid WHERE ztile.mean_fiber_ra BETWEEN 240.05 AND 242.05 AND ztile.mean_fiber_dec BETWEEN 42.45 AND 44.45 AND zpix.z BETWEEN 0.495 AND 0.505 AND zpix.zwarn = 0
-        """
+        "Return only the SQL query inside a code block (```sql ... ```) and nothing else. "
+        "Avoid explanations, prefaces, or post-processing text. Follow ADQL format strictly.\n\n"
+        "Important rules:\n"
+        "- ADQL does NOT support the `LIMIT` clause.\n"
+        "- Use BETWEEN or JOIN clauses appropriately.\n"
+        "- Ensure the query is executable in a TAP service.\n"
     )
-    
-    examples = ""
-    rl_context = adql.find_similar_adql_queries(user_input, adql_collection, top_k=5)
-    if rl_context:
-        examples = "\n\n".join([f"NL: {q['user_query']}\nADQL:\n{q['generated_adql']}" for q in rl_context])
+
+    # Build the initial messages
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "system", "content": f"Available columns: {available_columns}"},
-        {"role": "system", "content": f"Here are successful examples from the past:\n\n{examples}"},
-        {"role": "user", "content": user_input}
+        {"role": "system", "content": f"Available columns: {available_columns}"}
     ]
-    
+
+    # Incorporate RL-based examples (positive + negative)
+    rl_context = adql.find_similar_adql_queries(user_input, adql_collection, top_k=5)
+
+    if rl_context:
+        # Positive examples
+        if rl_context["positive"]:
+            pos_examples = "\n\n".join([
+                f"NL: {doc['user_query']}\nADQL:\n{doc['generated_adql']}" 
+                for doc in rl_context["positive"]
+            ])
+            messages.append({
+                "role": "system",
+                "content": f"Here are good ADQL examples you should follow:\n\n{pos_examples}"
+            })
+
+        # Negative examples
+        if rl_context["negative"]:
+            neg_examples = "\n\n".join([
+                f"NL: {doc['user_query']}\nIncorrect ADQL:\n{doc['generated_adql']}" 
+                for doc in rl_context["negative"]
+            ])
+            messages.append({
+                "role": "system",
+                "content": f"Here are incorrect ADQL examples to avoid:\n\n{neg_examples}"
+            })
+
+    # Add conversation history for context
+    max_tokens_for_history = 3000  # adjustable
+    token_count = 0
+    history_messages = []
+
+    adql_history = st.session_state.get("adql_history", [])[::-1]
+    for entry in adql_history:
+        est_tokens = len(entry["content"]) // 4
+        if token_count + est_tokens > max_tokens_for_history:
+            break
+        history_messages.insert(0, entry)
+        token_count += est_tokens
+
+    for msg in history_messages:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+
+    # Add the current query
+    messages.append({"role": "user", "content": user_input})
+
+    # Generate ADQL
     try:
         response = client.chat.completions.create(
             messages=messages,
@@ -146,18 +176,39 @@ def generate_adql_query(user_input, df_reference, client, temp_val):
         )
         full_response = response.choices[0].message.content.strip()
 
-        # Extract SQL query from code block
+        # Extract SQL from ```sql block
         match = re.search(r"```sql\s*(.*?)\s*```", full_response, re.DOTALL)
-        if match:
-            adql_query = match.group(1).strip()  # Extract SQL query inside ```
-        else:
-            # If no code block is found, assume the whole response is the query
-            adql_query = full_response.strip()
-
+        adql_query = match.group(1).strip() if match else full_response.strip()
         return adql_query
+
     except Exception as e:
         st.error(f"Error generating ADQL query: {e}")
         return None
+
+def render_latex_from_response(response_text):
+    """
+    Automatically detects and renders LaTeX-style math and markdown from OpenAI responses.
+    Supports $$...$$ blocks, $...$ inline, ```math blocks, and fallback markdown.
+    """
+    # Handle ```math ... ``` blocks first
+    response_text = re.sub(r"```math(.*?)```", r"$$\1$$", response_text, flags=re.DOTALL)
+
+    # Split line by line for precise rendering
+    for line in response_text.split("\n"):
+        stripped = line.strip()
+
+        if stripped.startswith("$$") and stripped.endswith("$$"):
+            # Block LaTeX
+            st.latex(stripped.strip("$$"))
+        elif re.search(r"\$(.+?)\$", stripped):
+            # Inline LaTeX → convert $...$ to \( ... \) for Streamlit markdown
+            converted = re.sub(r"\$(.+?)\$", r"\\(\1\\)", line)
+            st.markdown(converted)
+        elif stripped.startswith("```") and stripped.endswith("```"):
+            # Handle code blocks as code
+            st.code(stripped.strip("`"), language="python")
+        else:
+            st.markdown(line)
 
 # Main application
 if "decrypted" not in st.session_state:
@@ -288,15 +339,36 @@ else:
                         context_snippets = "\n\n".join([doc["text"] for doc in relevant_docs[:3]])  # Limit to 1000 chars per doc
                         context = f"Relevant document context:\n\n{context_snippets}"
 
+                    # Add new user query to history
+                    st.session_state["history"].append({"role": "user", "content": user_input})
+
+                    # Token-safe chat memory
+                    max_history_tokens = 800  # ~adjust depending on temperature + model
+                    token_count = len(context) // 4
+                    messages = [{"role": "system", "content": context}]
+
+                    # Traverse from latest to earliest
+                    chat_history = st.session_state["history"][::-1]
+                    history_trimmed = []
+
+                    for entry in chat_history:
+                        est_tokens = len(entry["content"]) // 4
+                        if token_count + est_tokens > max_history_tokens:
+                            break
+                        history_trimmed.insert(0, entry)  # maintain original order
+                        token_count += est_tokens
+
+                    # Add trimmed memory
+                    messages.extend(history_trimmed)
+
+                    # Now query the model
                     response = client.chat.completions.create(
-                        messages=[
-                            {"role": "system", "content": context},
-                            {"role": "user", "content": user_input}
-                        ],
+                        messages=messages,
                         model="gpt-4o",
                         max_tokens=token_limit,
                         temperature=temp_val,
                     )
+
                     assistant_message = response.choices[0].message.content
                     st.session_state["history"].append({"role": "assistant", "content": assistant_message})
                     st.session_state['last_response'] = assistant_message
@@ -306,29 +378,45 @@ else:
 
             # Retry last query
             if retry_query:
-                retry_message = f"Previous query: {st.session_state['last_query']}. Retrying with improvements."
+                retry_message = f"Previous query: {st.session_state['last_query']}. Retry with improvements. Here was the response: {st.session_state['last_response']}."
                 st.session_state["history"].append({"role": "user", "content": retry_message})
 
+                # 🧠 Reuse previous relevant docs (if available)
+                reference_context = ""
+                if reference_toggle and "relevant_docs" in st.session_state:
+                    context_snippets = "\n\n".join([doc["text"] for doc in st.session_state["relevant_docs"][:3]])
+                    reference_context = f"Relevant document context:\n\n{context_snippets}"
+
                 try:
+                    messages = []
+                    if reference_context:
+                        messages.append({"role": "system", "content": reference_context})
+                    
+                    messages.append({"role": "system", "content": "You are a helpful assistant. Improve the previous response, as it is not sufficient."})
+                    messages.append({"role": "user", "content": retry_message})
+
                     response = client.chat.completions.create(
-                        messages=[
-                            {"role": "system", "content": "You are a helpful assistant. Improve the previous response."},
-                            {"role": "user", "content": retry_message}
-                        ],
+                        messages=messages,
                         model="gpt-4o",
                         max_tokens=token_limit,
                         temperature=temp_val,
                     )
                     assistant_response = response.choices[0].message.content
+
+                    # ✅ Update session state with new response
                     st.session_state["history"].append({"role": "assistant", "content": assistant_response})
-                    st.session_state['last_response'] = assistant_response
+                    st.session_state["last_response"] = assistant_response
+
+                    # ✅ Optionally trigger rerun to show it immediately (optional)
+                    st.rerun()
+
                 except Exception as e:
                     st.error(f"Error: {e}")
 
             # Display last response
             if "last_response" in st.session_state and st.session_state["last_response"]:
                 st.write("### chatDESI")
-                st.markdown(st.session_state["last_response"])
+                adql.render_openai_with_math(st.session_state["last_response"])
 
             # Expandable chat history (instead of sidebar)
             with st.expander("View Full Chat History", expanded=False):
@@ -339,17 +427,24 @@ else:
                         st.code(chat['content'], language="markdown")
 
             # Sidebar for Relevant Documents
+
             with st.sidebar:
                 st.write("## Relevant Documents")
+                if "relevant_docs" in st.session_state and st.session_state["relevant_docs"]:
+                    for doc in st.session_state["relevant_docs"]:
+                        filename = doc["metadata"].get("filename", "Unnamed")
+                        similarity = doc.get("similarity", None)
+                        score_str = f" — Similarity: {similarity:.2f}" if similarity is not None else ""
 
-                # Add a collapsible section for relevant documents
-                with st.expander("View Relevant Documents", expanded=True):
-                    if "relevant_docs" in st.session_state and st.session_state["relevant_docs"]:
-                        for doc in st.session_state["relevant_docs"]:
-                            with st.expander(f"{doc['metadata']['filename']}", expanded=False):
-                                st.markdown(doc['text'])
-                    else:
-                        st.write("No relevant documents found.")
+                        text_chunk = doc["text"]
+
+                        with st.sidebar.expander(f"{filename}{score_str}", expanded=False):
+                            st.markdown(text_chunk, unsafe_allow_html=True)
+
+                else:
+                    st.write("No relevant documents found.")
+
+
 
 
             # Clear chat history button

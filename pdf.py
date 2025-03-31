@@ -6,6 +6,7 @@ import hashlib
 import os
 import torch
 from transformers import AutoTokenizer, AutoModel
+import re
 
 # Load Hugging Face Model for Tokenization & Embeddings
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # Change this to a 1536/3072-d model if needed
@@ -88,7 +89,6 @@ def load_pdfs_into_db(pdf_dir, mongo_username, mongo_password):
             text = extract_text_from_pdf(pdf_path)
             add_pdf_to_db(text, filename, collection)
 
-# Retrieve Relevant Documents Using Cosine Similarity
 def find_relevant_docs(query, mongo_username, mongo_password, top_k=3):
     collection = connect_to_mongo(mongo_username, mongo_password)
     query_embedding = embed_text(query)
@@ -103,10 +103,26 @@ def find_relevant_docs(query, mongo_username, mongo_password, top_k=3):
     # Compute Cosine Similarities
     query_embedding = np.array(query_embedding).reshape(1, -1)
     similarities = cosine_similarity(query_embedding, embeddings).flatten()
-    sorted_indices = similarities.argsort()[::-1][:top_k]  # Get top-k most similar
+    sorted_indices = similarities.argsort()[::-1][:top_k]
 
-    relevant_docs = [documents[i] for i in sorted_indices]
+    # Add similarity scores to docs
+    relevant_docs = []
+    for i in sorted_indices:
+        doc = documents[i]
+        doc["similarity"] = round(float(similarities[i]), 3)  # Add similarity score
+        relevant_docs.append(doc)
+
     return relevant_docs
+
+def highlight_keywords(text, query):
+    terms = re.findall(r'\b\w+\b', query.lower())
+    for term in set(terms):
+        pattern = re.compile(rf'\b({re.escape(term)})\b', re.IGNORECASE)
+        # Highlight with HTML span
+        text = pattern.sub(r'<span style="background-color: #ffff00; font-weight: bold;">\1</span>', text)
+    return text
+
+
 
 # Clear MongoDB Collection
 def clear_collections(mongo_username, mongo_password):

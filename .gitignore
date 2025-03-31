@@ -3,5 +3,6 @@
 *.png
 *.csv
 *.txt
+*.pdf
 /papers/
 *.DS_Store
