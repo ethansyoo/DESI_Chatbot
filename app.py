@@ -187,28 +187,43 @@ def generate_adql_query(user_input, df_reference, client, temp_val):
 
 def render_latex_from_response(response_text):
     """
-    Automatically detects and renders LaTeX-style math and markdown from OpenAI responses.
-    Supports $$...$$ blocks, $...$ inline, ```math blocks, and fallback markdown.
+    Enhanced LaTeX rendering that:
+    - Converts \[...\], $$...$$ to st.latex blocks
+    - Converts \( ... \) and $...$ to inline math
+    - Converts (\\alpha) style to \(\\alpha\)
+    - Detects LaTeX-y standalone lines and renders them with st.latex
     """
-    # Handle ```math ... ``` blocks first
-    response_text = re.sub(r"```math(.*?)```", r"$$\1$$", response_text, flags=re.DOTALL)
+    import re
 
-    # Split line by line for precise rendering
+    # Normalize escaped math environments
+    response_text = response_text.replace("\\\\", "\\")
+    response_text = re.sub(r"\\\[(.*?)\\\]", r"$$\1$$", response_text, flags=re.DOTALL)
+    response_text = re.sub(r"\\\((.*?)\\\)", r"$\1$", response_text)
+
+    # Convert (\\rho), (\\Lambda), (a(t)), etc. → \(\rho\)
+    response_text = re.sub(r"\((\\[a-zA-Z0-9_\{\}\^\.\(\) ]+)\)", r"\\(\1\\)", response_text)
+
     for line in response_text.split("\n"):
-        stripped = line.strip()
+        line = line.strip()
+        if not line:
+            continue
 
-        if stripped.startswith("$$") and stripped.endswith("$$"):
-            # Block LaTeX
-            st.latex(stripped.strip("$$"))
-        elif re.search(r"\$(.+?)\$", stripped):
-            # Inline LaTeX → convert $...$ to \( ... \) for Streamlit markdown
-            converted = re.sub(r"\$(.+?)\$", r"\\(\1\\)", line)
-            st.markdown(converted)
-        elif stripped.startswith("```") and stripped.endswith("```"):
-            # Handle code blocks as code
-            st.code(stripped.strip("`"), language="python")
-        else:
-            st.markdown(line)
+        # Block math
+        if line.startswith("$$") and line.endswith("$$"):
+            st.latex(line.strip("$$"))
+            continue
+
+        # Line that looks like full LaTeX
+        if re.match(r"^\\?[a-zA-Z\\\{\}_^0-9\s\(\)\+\-\*/=<>|]+$", line) and any(sym in line for sym in ["\\frac", "\\rho", "\\pi", "\\Lambda", "\\dot", "\\ddot", "_", "^", "="]):
+            try:
+                st.latex(line)
+            except:
+                st.markdown(line)
+            continue
+
+        # Inline LaTeX like \(\rho\)
+        st.markdown(line)
+
 
 # Main application
 if "decrypted" not in st.session_state:
@@ -360,7 +375,13 @@ else:
 
                     # Add trimmed memory
                     messages.extend(history_trimmed)
-
+                    messages.insert(0, {
+                        "role": "system",
+                        "content": (
+                            "When including math equations, always wrap them in either `\\[...\\]` for display mode or `\\(...\\)` for inline math. "
+                            "Do not write raw LaTeX expressions outside of math environments."
+                        )
+                    })
                     # Now query the model
                     response = client.chat.completions.create(
                         messages=messages,
@@ -403,11 +424,9 @@ else:
                     )
                     assistant_response = response.choices[0].message.content
 
-                    # ✅ Update session state with new response
                     st.session_state["history"].append({"role": "assistant", "content": assistant_response})
                     st.session_state["last_response"] = assistant_response
 
-                    # ✅ Optionally trigger rerun to show it immediately (optional)
                     st.rerun()
 
                 except Exception as e:
@@ -416,7 +435,7 @@ else:
             # Display last response
             if "last_response" in st.session_state and st.session_state["last_response"]:
                 st.write("### chatDESI")
-                adql.render_openai_with_math(st.session_state["last_response"])
+                render_latex_from_response(st.session_state["last_response"])
 
             # Expandable chat history (instead of sidebar)
             with st.expander("View Full Chat History", expanded=False):
